@@ -1,0 +1,463 @@
+---
+title: "EDA_TV"
+author: "Zhirui"
+date: '2023-07-07'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(stringr)
+library(dplyr)
+```
+
+
+```{r}
+data <- read_tsv("NetworkTV.tsv")
+```
+
+
+```{r}
+head(data)
+```
+
+```{r}
+data2 <- read_tsv("Brand.tsv")
+```
+
+
+```{r}
+head(data2)
+```
+
+
+
+```{r}
+I <- grep("MEDICARE", data2$BrandDesc) # searching for MEDICARE string in the column BrandDesc in data2
+```
+
+
+```{r}
+tmp = data2[I,] # create a sub-dataframe called tmp with indexes vector I 
+head(tmp)
+print(nrow(tmp))
+```
+
+```{r}
+I2 <- grep("MEDICARE ADVANTAGE", data2$BrandDesc) # searching for MEDICARE ADVANTAGE string in the column BrandDesc in data2
+print(I2)
+```
+
+
+```{r}
+tmp2 = data2[I2,] # create a sub-dataframe called tmp2 with indexes vector I2
+print(tmp2)
+```
+
+
+
+
+
+```{r}
+I3 <- grep("MEDICARE ADVANTAGE", data2$BrandVariant) # searching for MEDICARE ADVANTAGE string in the column BrandVariant in data2
+print(I3)
+```
+
+
+```{r}
+tmp3 = data2[I3,] # create a sub-dataframe called tmp3 with indexes vector I3
+print(tmp3)
+```
+
+```{r}
+length(tmp3$BrandCode)
+```
+
+
+```{r}
+indices <- lapply(tmp3$BrandCode, function(x) which(data$PrimBrandCode == x)) 
+```
+
+
+
+
+```{r}
+new_df <- data.frame()
+for (i in 1:151){
+  if(length(indices[[i]]) != 0){
+    subset <- data[indices[[i]],]
+    print(nrow(subset))
+    new_df <- rbind(new_df, subset)
+  }
+}
+print(nrow(new_df))
+```
+
+
+
+
+
+```{r}
+new_brands = tmp3[c(6, 56, 146),] # saving targeted BrandCode to a separate dataframe 
+head(new_brands)
+write.csv(new_brands, "Target_brands.csv", row.names = FALSE)
+```
+
+
+```{r}
+head(new_df)
+write.csv(new_df, "TV_filtered.csv", row.names = FALSE)
+```
+
+```{r}
+new_df
+new_df %>% arrange(PrimBrandCode,ScndBrandCode,TerBrandCode) #THis shows us that all of the outputs don't have tertiary nor secondary brand codes
+```
+
+
+```{r}
+date_count <- table(new_df$AdDate)
+date_count <- as.data.frame.table(date_count)
+names(date_count) <- c("date", "count")
+date_count$date <- as.Date(date_count$date)
+date_count
+```
+
+```{r}
+library(ggplot2)
+```
+
+
+```{r}
+ggplot(data = date_count, aes(x = date, y = count)) +
+  geom_bar(stat="identity") +
+  theme_minimal() +
+  xlab("Date") +
+  ylab("Count") +
+  ggtitle("Count of ADs")
+```
+
+```{r}
+ggplot(new_df) + 
+  geom_density(aes(x=Duration), fill = "red", alpha=0.5) + 
+  theme_minimal() +
+  xlab("Duration") +
+  ylab("Density") +
+  ggtitle("Density plot of the Duration column")
+```
+
+
+
+```{r}
+ggplot(new_df, aes(x = "", y = Spend)) +
+  geom_boxplot(fill = "blue") +
+  scale_y_log10() +
+  theme_minimal() +
+  ylab("log scale of Spend") +
+  ggtitle("Box plot of the Spend column (log scale)")
+```
+
+
+
+```{r}
+outdoor <- read_tsv("Outdoor.tsv")
+newspaper <- read_tsv("Newspaper.tsv")
+```
+
+
+
+```{r}
+indices2 <- lapply(seq_along(tmp3$BrandCode), function(i) {
+  x <- tmp3$BrandCode[i]
+  indices <- which(outdoor$PrimBrandCode == x)
+  list(BrandCodes = indices)
+})
+
+for (i in 1:length(indices2)) {
+  if(length(indices2[[i]]$BrandCodes)) {
+    cat("Indices:", i, "\n")
+    cat("BrandCodes:", indices2[[i]]$BrandCodes, "\n\n")
+  }
+}
+```
+
+
+```{r}
+indices3 <- lapply(seq_along(tmp3$BrandCode), function(i) {
+  x <- tmp3$BrandCode[i]
+  indices <- which(newspaper$PrimBrandCode == x)
+  list(BrandCodes = indices)
+})
+
+for (i in 1:length(indices3)) {
+  if(length(indices3[[i]]$BrandCodes)) { # check if there are any elements 
+    cat("Indices:", i, "\n")
+    cat("BrandCodes:", indices3[[i]]$BrandCodes, "\n\n")
+  }
+}
+```
+
+
+
+```{r}
+product <- read_tsv("ProductCategories.tsv")
+adv <- read_tsv("Advertiser.tsv")
+```
+
+```{r}
+head(product)
+head(adv)
+```
+
+
+```{r}
+product_I <- grep("LIFE & MEDICAL INSURANCE", product$PCCMajDesc)
+product_HI <- product[product_I,]
+product_HI
+```
+
+```{r}
+# data2: brand dataset
+filtered_data2 = data2[data2$PCCSubCode == "B212",]
+dim(filtered_data2)
+```
+
+
+
+```{r}
+"""
+tmp = unique(filtered_data2$AdvParentCode)
+df_filtered <- data.frame()
+
+for (i in 1:length(tmp)){
+  count = length(adv[adv$AdvParentCode == tmp[i],])
+  df_filtered = rbind(df_filtered, data.frame(AdvParentCode = tmp[i], Count = count))
+}
+
+head(df_filtered)
+dim(df_filtered)
+"""
+```
+
+
+```{r}
+head(filtered_data2)
+```
+
+```{r}
+unique(adv[adv$AdvParentCode == 11015,]$AdvParentDesc)
+```
+
+
+```{r}
+tmp = unique(filtered_data2$AdvParentCode)
+data_list <- vector("list", length(tmp))
+
+for (i in 1:length(tmp)){
+  count = dim(adv[adv$AdvParentCode == tmp[i],])[1]
+  data_list[[i]] <- list(AdvParentCode = tmp[i], Count = count)
+}
+
+df_filtered <- do.call(rbind, lapply(data_list, data.frame))
+# Here, lapply(data_list, data.frame) is used to convert each element of data_list into a data frame. This will result in a list of data frames.
+# Here, do.call(rbind, ...) is used to call the rbind() function with the list of data frames 
+
+head(df_filtered)
+dim(df_filtered)
+# df_filtered stored the information of how many times the AdvParentCode occur given that the product code is B212 (MEDICAL & DENTAL INSURANCE) and it appears in the brand dataset 
+```
+
+
+
+```{r}
+df_sorted <- df_filtered[order(df_filtered$Count, decreasing = TRUE), ]
+df_sorted[1:20,] 
+# store the df_filtered by decreasing order
+# advertiser 11015 has the highest number of occurrences given the product code B212 and it appears in the brand dataset 
+```
+
+
+```{r}
+top_adv = df_sorted$AdvParentCode
+length(data2[data2$AdvParentCode == top_adv[1],]$BrandCode)
+# AdvParentCode 11015 appears 4171 times in the brand dataset
+# AdvParentCode 11015 appears 761 times in the advertiser dataset 
+```
+
+
+
+```{r}
+data2[data2$AdvParentCode == top_adv[1],]$BrandCode
+# Below are the BrandCode associate with AdvParentCode 11015
+```
+
+
+```{r}
+topBrands <- vector("list", length(20))
+for (i in 1:20){
+  count = length(data2[data2$AdvParentCode == top_adv[i],]$BrandCode)
+  topBrands[[i]] = list(AdvParentCode = top_adv[i], CountBrands = count)
+}
+
+topBrands_count = do.call(rbind, lapply(topBrands, data.frame))
+
+head(topBrands_count)
+dim(topBrands_count)
+# Below table counts how many times the AdvParentCode appears in the Brand dataset given the product code B212 by decreasing order 
+```
+
+```{r}
+most_brands <- data2[data2$AdvParentCode == top_adv[1],]
+head(most_brands)
+# Below table shows what brands are associated with AdvParentCode 11015 
+```
+
+
+```{r}
+most_brands_I <- grep("MEDICAL", most_brands$BrandVariant)
+most_brands_adv = most_brands[most_brands_I,]
+most_brands_adv
+# Below table shows what brands are associated with AdvParentCode 11015 and contains keyword "MEDICAL" in the BrandVariant column 
+```
+
+```{r}
+tmp2 = table(most_brands_adv$BrandDesc)
+tmp2 = sort(tmp2, decreasing = TRUE)
+tmp2[1:10]
+```
+
+# Other: 
+
+```{r}
+advI <- grep("MEDICARE ADVANTAGE", adv$AdvParentDesc)
+advMA <- adv[advI,]
+advMA
+# there are only four AdvParentCodes contains key word "MEDICARE ADVANTAGE" in the Advertiser dataset 
+```
+
+
+
+
+```{r}
+indices4 <- lapply(seq_along(advMA$AdvParentCode), function(i) {
+  x <- advMA$AdvParentCode[i]
+  indices <- which(data2$AdvParentCode == x)
+  list(AdvParentCode = advMA$AdvParentCode[i], R = indices)
+})
+
+for (i in 1:length(indices4)) {
+  if(length(indices4[[i]]$AdvParentCode)) { # check if there are any elements 
+    cat("Indices:", i, "\n")
+    cat("AdvParentCode:", indices4[[i]]$AdvParentCode, "\n")
+    cat("Row:", indices4[[i]]$R, "\n\n")
+  }
+}
+# When I tried to match each AdvParentCode from the Advertiser dataset that contains keyword "MEDICARE ADVANTAGE" from the Brand dataset, there is only one match, the BrandCode is 3158356
+```
+
+
+```{r}
+data2[2393358,]
+```
+
+
+```{r}
+data2[2393358,]$BrandCode
+```
+
+
+
+```{r}
+any(data$PrimBrandCode == data2[2393358,]$BrandCode)
+# when I tried to match BrandCode 3158356 to the NetworkTV dataset, there is no match 
+```
+
+
+
+
+```{r}
+library(data.table)
+```
+
+
+```{r}
+chunk_size <- 1000000 
+data <- NULL 
+
+current_skip <- 0 
+count = 0
+while (TRUE) {
+    chunk <- fread("data/ads/2019/Occurrences/SpotTV.tsv", skip = current_skip, nrows = chunk_size)
+    
+    number_rows <- nrow(chunk)
+    # number_rows < chunk_size
+    if (count == 5) {
+      data <- rbind(data, chunk, fill = TRUE)
+      all_rows = number_rows + (chunk_size * count)
+      formatted_result <- format(all_rows, scientific = FALSE)
+      print(paste("number of rows are:", formatted_result))
+      break
+    }
+
+    if (is.null(data)) {
+      data <- chunk
+    } else {
+      data <- rbind(data, chunk, fill = TRUE)
+    }
+    all_rows = number_rows + (chunk_size * count) 
+    formatted_result <- format(all_rows, scientific = FALSE)
+    print(paste("number of rows are:", formatted_result))
+    
+    count = count + 1
+    current_skip <- current_skip + chunk_size
+```
+
+
+```{r}
+chunk_size <- 5000000 
+chunks_list <- list() 
+
+current_skip <- 0 
+count = 0
+while (TRUE) {
+    chunk <- fread("data/ads/2019/Occurrences/SpotTV.tsv", skip = current_skip, nrows = chunk_size)
+    
+    number_rows <- nrow(chunk)
+    
+    if (number_rows == 0) {
+        # If it's the 6th iteration or no more data to read, break the loop
+        break
+    }
+    
+    # Append the chunk to the list
+    chunks_list[[length(chunks_list) + 1]] <- chunk
+    
+    all_rows <- number_rows + (chunk_size * count) 
+    formatted_result <- format(all_rows, scientific = FALSE)
+    print(paste("number of rows are:", formatted_result))
+    
+    count <- count + 1
+    current_skip <- current_skip + chunk_size
+```
+
+
+
+```{r}
+# total number of rows are 313737851
+chunks_list[[1]]
+```
+
+
+
+
+
+
+
+
+
+
+

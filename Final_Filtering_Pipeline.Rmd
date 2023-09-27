@@ -1,0 +1,684 @@
+---
+title: "Final Filtering Pipeline"
+output:
+  html_document: default
+  word_document: default
+date: '2023-07-24'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading necessary packages
+```{r}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(flextable)
+library(data.table)
+library(vroom)
+library(parallel)
+#library(lemon)
+```
+
+## Loading necessary files as dataframes
+```{r}
+gc() #garbage collection to be mindful of memory use
+
+
+net_tv <- fread("/users/dkim221/data/ads/2019/Occurrences/NetworkTV.tsv")
+
+brand <- read_tsv("/users/dkim221/data/ads/2019/References/Brand.tsv")
+
+adver <- fread("/users/dkim221/data/ads/2019/References/Advertiser.tsv")
+
+#distr <- read_tsv("/users/dkim221/data/ads/2019/References/Distributor.tsv")
+
+prod_cat <- fread("/users/dkim221/data/ads/2019/References/ProductCategories.tsv", nrows = 3000) #to see what error comes up 
+
+#system.time(spot_tv <- vroom("/users/dkim221/data/ads/2019/Occurrences/SpotTV.tsv"))
+#    user  system elapsed 
+# 213.675 130.364 188.117 
+system.time(spot_tv_sel <- vroom("/users/dkim221/data/ads/2019/Occurrences/SpotTV.tsv", col_select = c(AdDate:TerBrandCode, Spend)))
+# user  system elapsed 
+# 186.547  94.943 143.896 
+
+
+
+#spot_tv <- read_tsv("/users/dkim221/data/ads/2019/Occurrences/SpotTV.tsv", n_max = 40000000)
+system.time(spot_tv <- fread("/users/dkim221/data/ads/2019/Occurrences/SpotTV.tsv", nrows = 40000000))
+#View(spot_tv)
+```
+## Prelim Filtering: Filtering Product Categories for Medical and Dental Insurance ProductIDs
+```{r}
+#B210 = PCCMajCode for Life & Medical insurance 
+#B212 = PCCSubCode for Medical & Dental Insurance
+
+med_insur_prod_code <- prod_cat %>% filter(PCCSubCode == "B212") ; med_insur_prod_code#filtering by the PCCSubDesc code for Medical & Dental Insurance
+
+#We can see that PCCMajorCode and PCCIndusCode are the same (under Life & Medical Insurance), so let's get more granular. 
+#We want to focus on the ProductIDs, which are unique:
+hinsur_code_desc <- prod_cat %>% 
+  filter(PCCSubCode == "B212") %>% #filtering by the PCCSubDesc code for Medical & Dental Insurance
+  select(ProductID, ProductDesc)
+hinsur_code_desc #these are the ProductIDs of Medical & Dental Insurance products and their descriptions
+
+prod_ids_health_insur <- med_insur_prod_code[['ProductID']] #vector of ProductID codes for Medical and Dental Insurance
+
+#Linking Medical and Health Insurance ProductIDs with brands in Brand.tsv to get Medical & Health insurance brands by filtering brand by the productIDs identified to for Medical & Dental Insurance products
+health_insur_brands <- brand %>% 
+  filter(ProductID %in% prod_ids_health_insur)
+head(health_insur_brands) #df of only and all brands with ProductIDs related to Medical & Dental Health Insurance... we will filter this by known MA advertisers to identify brand codes that are likely to be indicative of MA ads
+
+```
+## Filtering Advertisers for known MA advertisers (via Grepping for known MA providers in Advertiser (Parent and Subsidiary) Desc)
+Now let's find all the advertisers associated with one known case of Medicare Advantage advertisers: Aetna
+```{r}
+adv_aetna <- dplyr::filter(adver, grepl("AETNA",AdvSubsidDesc) | grepl("AETNA",AdvParentDesc)) #df of advertisers that have Aetna in the subsidiary or parent advertiser description
+adv_aetna #Note that this is not clean -- there are non-HI companies that are filtered in with Aetna
+
+# Extracting the unique AdvParentCodes and AdvSubsidCodes of advertisers associated with Aetna in desc
+adv_parent_aetna <- adv_aetna %>%
+  select(AdvParentCode) %>%
+  distinct(AdvParentCode)
+adv_subsid_aetna <- adv_aetna %>%
+  select(AdvSubsidCode) %>%
+  distinct(AdvSubsidCode)
+
+comb_aetna <-  merge(data.frame(adv_parent_aetna, row.names=NULL), data.frame(adv_subsid_aetna,row.names=NULL),
+      by = 0, all = TRUE)[-1] #combining unique par and subsid adver code dfs for Aetna horizontally
+comb_aetna
+
+
+#renaming the AdvParentCode and AdvSubsidCode columns in brand df to avoid confusion in the future
+rename_brand_cols = c(AdvParentCode_b = "AdvParentCode", AdvSubsidCode_b = "AdvSubsidCode")
+hi_brands_rename <- health_insur_brands %>%
+  rename(all_of(rename_brand_cols))
+
+# Filtering Medical and Dental Insurance Brands by known MA Advertiser Codes & Extracting Unique Brand Codes
+aetna_hi_brands <- hi_brands_rename %>% #df of brands whose parent or subsid adv code belong to "Aetna"
+  filter(AdvSubsidCode_b %in% comb_aetna$AdvSubsidCode |
+                  AdvParentCode_b %in% comb_aetna$AdvParentCode) #filter brands
+  # filter(AdvSubsidCode_b %in% par_subsid_adv_codes[[1]]$AdvSubsidCode |
+  #                 AdvParentCode_b %in% par_subsid_adv_codes[[1]]$AdvParentCode) #filter brands
+
+#Filtering Medical and Dental Insurance coded brands that are affiliated with Aetna as an advertiser by branddesc and brandvar for MA-related keywords
+aetna_ma_search <- filter(aetna_hi_brands, grepl("MEDICARE ADV",BrandDesc) | grepl("MEDICARE ADV",BrandVariant))
+#View(aetna_ma_search)
+
+aetna_m_search <- filter(aetna_hi_brands, grepl("MEDICARE",BrandDesc) | grepl("MEDICARE",BrandVariant))
+#View(aetna_m_search)
+
+aetna_keywords <- rbind(aetna_ma_search, aetna_m_search) ; aetna_keywords #test df for loop, combined df of keywords
+
+#Finding unique BrandCodes of medical and dental insurance brands containing "MEDICARE" or "MEDICARE ADV" in their branddesc or brandvar:
+aetna_m_ma_brand_codes <- aetna_keywords %>%
+  select(BrandCode) %>%
+  distinct(BrandCode)
+
+# Filtering NetTV and SpotTV Occurrences by the BrandCodes of Brands affiliated with known MA Advertisers
+aetna_m_occur <- net_tv %>%
+  filter(PrimBrandCode %in% aetna_m_ma_brand_codes$BrandCode |
+           ScndBrandCode %in% aetna_m_ma_brand_codes$BrandCode |
+           TerBrandCode %in% aetna_m_ma_brand_codes$BrandCode)
+aetna_m_occur
+#NOTE: Spot TV only has 40,000,000 occurrences, real number of rows is:
+spot_aetna_m_occ <-  spot_tv %>%
+  filter(PrimBrandCode %in% aetna_m_ma_brand_codes$BrandCode |
+           ScndBrandCode %in% aetna_m_ma_brand_codes$BrandCode |
+           TerBrandCode %in% aetna_m_ma_brand_codes$BrandCode) ; spot_aetna_m_occ
+
+```
+## Generalizing code to consider multiple known MA providers and MA-related keywords
+Some useful functions for doing so below.
+
+NEED TESTING FOR FUNCTIONS -- READ INTO AUTOMATED TEST SUITES FOR R
+```{r}
+#' Outputs the unique values of a given column given a df
+#'
+#' @param df dataframe contianing col_name
+#' @param col_name name of col_name as an object
+#'
+#' @return df with one column (the col_name) with only unique values
+#' @export
+#'
+#' @examples
+unique_codes <- function(df, col_name) {
+  df %>% 
+    select({{col_name}}) %>% 
+    distinct({{col_name}})
+}
+
+# filters a df with the cols "PrimBrandCode", "ScndBrandCode", "TerBrandCode" by an inputted df of BrandCodes
+#   tv_df: a dataframe containing the cols "PrimBrandCode", "ScndBrandCode", "TerBrandCode"
+#   brand_codes: a df containing a column called "BrandCode"
+
+#' filters a df with the cols "PrimBrandCode", "ScndBrandCode", "TerBrandCode" by an inputted df of BrandCodes
+#'
+#' @param tv_df a dataframe containing the cols "PrimBrandCode", "ScndBrandCode", "TerBrandCode"
+#' @param brand_code_df a df containing a column called "BrandCode"
+#'
+#' @return df of filtered 
+#'
+#' @examples filter_by_brand(net_tv,aetna_m_ma_brand_codes)
+filter_by_brand <- function(tv_df, brand_code_df) {
+  tv_df %>%
+    filter(PrimBrandCode %in% {{brand_code_df}}$BrandCode | ScndBrandCode %in% {{brand_code_df}}$BrandCode | TerBrandCode %in% {{brand_code_df}}$BrandCode)
+}
+
+
+```
+## Objective: Identifying MA ads given a list of known MA companies as advertisers and a list of MA-related keywords (for BrandDesc and BrandVar)
+```{r}
+### Filtering all advertisers (in ma_adv_l) who have the following known MA providers in their parent or subsid advertiser desc
+ma_adv_l <- c("AETNA", "CIGNA", "HUMANA") ### USER: ADD TO ME
+
+ma_adv_df_l <- list() #list of dfs containing (par and subsid) advertisers whose descriptions contain known medicare advantage (MA) providers, as specified in ma_adv_l
+for (i in 1:length(ma_adv_l))  {
+  ma_adv_df_l[[i]] <- adver %>% 
+    filter(grepl(ma_adv_l[i],AdvSubsidDesc) | grepl(ma_adv_l[i],AdvParentDesc))
+}
+#To view -- doesn't work
+# for (i in 1:length(ma_adv_df_l)) {
+#    ma_adv_df_l[[i]]
+# }
+
+# Creating dfs of the unique parent and subsid codes as two columns in one df for each advertiser
+par_subsid_adv_codes <- list() #list of dataframes with two columns: AdvParentCode and AdvSubsidCode
+for (i in 1:length(ma_adv_df_l)) {
+  adpar_c <- unique_codes(ma_adv_df_l[[i]],AdvParentCode)
+  adsub_c <- unique_codes(ma_adv_df_l[[i]],AdvSubsidCode)
+  par_subsid_adv_codes[[i]] <- cbind(adpar_c, adsub_c) # creating one df with unique AdvParentCode and AdvSubsidCode for each string in ma_adv_l
+}
+#lapply(par_subsid_adv_codes, View)
+
+#Some side effect verification/testing on our loops
+print(cat("length of aetna advertiser codes df list is same as length of MA advertiser 
+          df list:", length(par_subsid_adv_codes) == length(ma_adv_df_l)))
+
+for (i in 1:length(ma_adv_df_l)) {
+  print(cat("length of advertiser codes df list no.", i, "is same as length of MA advertiser 
+          df list:",nrow(par_subsid_adv_codes[[i]])==nrow(ma_adv_df_l[[i]]),"\n"))
+}
+
+
+### Filtering Brands by known MA Advertiser Codes & Extracting Unique Brand Codes
+ma_adv_hi_brands <- list() #list of dfs containing brands coded for Medical and Dental Insurance filtered by advertiser codes for each known MA advertisers in ma_adv_l
+for (i in 1:length(par_subsid_adv_codes)) {
+  ma_adv_hi_brands[[i]] <- health_insur_brands %>%
+    filter(AdvSubsidCode %in% par_subsid_adv_codes[[i]]$AdvSubsidCode | 
+             AdvParentCode %in% par_subsid_adv_codes[[i]]$AdvParentCode)
+}
+#lapply(ma_adv_hi_brands, View)
+
+
+
+### Filtering Medical & Dental Insurance & Known MA-affiliated Company Brands by keywords related to MA
+
+#For a list of keywords that we want to search the advertiser-filtered HI brand dfs with
+ma_keyword_l <- c("MEDICARE", "MEDICARE ADV") # FOR USER: ADD TO ME
+ma_keyword_brands <- list() #list of dfs containing medical and dental insurance brands (associated with known MA advertisers) who have MA-related keywords in their BrandVar and BrandDesc
+for (advertiser in 1:length(ma_adv_hi_brands)){
+  #print(cat("advertiser count:",advertiser,"\n")) #expected: 3 (1:3)
+  all_keys_one_adver <- data.frame(matrix(nrow=0,ncol=length(names(brand))))
+  colnames(all_keys_one_adver) <- names(brand)
+  for (keyword in 1:length(ma_keyword_l))  {
+    #print(cat("keyword count:",keyword)) #expected: 2 (1,2)
+    all_keys_one_adver <- rbind(all_keys_one_adver,
+                                ma_adv_hi_brands[[advertiser]] %>% 
+            filter(grepl(ma_keyword_l[[keyword]],BrandDesc) 
+                   | grepl(ma_keyword_l[[keyword]],BrandVariant)))
+  }
+  ma_keyword_brands[[advertiser]] <- all_keys_one_adver
+}
+#lapply(ma_keyword_brands, View)
+#Finding unique BrandCodes of keyword filtered Brands
+ma_keyword_unq_brand <- list() #list of dfs containing the unique brand codes of HI brands associated with known MA advertisers filtered by MA-related keywords
+for (i in 1:length(ma_keyword_brands)) {
+  ma_keyword_unq_brand[[i]] <-unique_codes(ma_keyword_brands[[i]], BrandCode)
+   # ma_keyword_brands[[i]] %>% 
+   #  select(BrandCode) %>% distinct(BrandCode)
+}
+
+```
+## General functions to do the above operations. 
+Contains functions to filter (parent and subsidiary) advertiser desc dfs by keywords, filter brands by advertiser codes, and filter brand descriptions and variants by keywords. 
+```{r} 
+#' filt_adv_by_key
+#'
+#' @param keyword_vec vector of keyword strings to filter a dataframe with the columns AdvParentDesc, AdvSubsidDesc, AdvParentCode,  AdvSubsidCode by
+#' @param adv_df a dataframe containing the columns: AdvParentDesc, AdvSubsidDesc, AdvParentCode,  AdvSubsidCode
+#'
+#' @return a list of dataframes, each with the two columns (AdvParentCode, AdvSubsidCode). The longer original column will have distinct values, while the shorter original column will fill with recycled values in the resultant dataframe. The size of the return value is the same as the inputted keyword_vec, andcan be indexed by keyword_vec.
+#'
+#' @export
+#'
+#' @examples
+filt_adv_by_key <- function(keyword_vec, adv_df) {
+
+df_l <- list() #instantiating list of dataframes to store our (par and subsid) Adv Codes dfs in
+for (i in 1:length(keyword_vec))  {
+  df_l[[i]] <- adv_df %>% 
+    filter(grepl(keyword_vec[i],AdvSubsidDesc) | grepl(keyword_vec[i],AdvParentDesc))
+}
+# Creating dfs of the unique parent and subsid codes as two columns in one df for each advertiser
+par_subsid_adv_codes_dfs <- list() #list of dataframes with two columns: AdvParentCode and AdvSubsidCode
+for (i in 1:length(df_l)) {
+  adpar_c <- unique_codes(df_l[[i]],AdvParentCode)
+  adsub_c <- unique_codes(df_l[[i]],AdvSubsidCode)
+  par_subsid_adv_codes_dfs[[i]] <- cbind(adpar_c, adsub_c) # creating one df with unique AdvParentCode and AdvSubsidCode for each string in 
+  }
+return (par_subsid_adv_codes_dfs)
+}
+
+#Tiny test below:
+identical(filt_adv_by_keyword(ma_adv_l, adver), par_subsid_adv_codes)
+fabk_adv_codes <- filt_adv_by_key(ma_adv_l, adver)
+
+###
+#' filt_brand_by_adv
+#' Filters a df, with columns of Brand.tsv, by values of AdvParentCode or AdvSubsidCode. Brand entry retained if it contains a AdvParentCode or AdvSubsidCode in an advertising codes df in list_adv_df.
+#' @param brand_df a df with columns of Brand.tsv; df to be filtered
+#' @param list_adv_df a list of dfs containing the columns AdvParentCode and AdvSubsidCode 
+#'
+#' @return a list of dfs, each with the columns of Brand.tsv, containing Brands that have been filtered by the list of adv dataframes. The size of the return value is the same as the inputted list_adv_df, and can be indexed by list_adv_df (or a keyword_vec used with filt_adv_by_keyword).
+#' @export
+#'
+#' @examples
+filt_brand_by_adv <-  function(brand_df, list_adv_df) {
+  filtered_brands <- list() #list of dfs containing brands coded for Medical and Dental Insurance filtered by advertiser codes for each known MA advertisers in ma_adv_l
+for (i in 1:length(list_adv_df)) {
+  filtered_brands[[i]] <- brand_df %>%
+    filter(AdvSubsidCode %in% list_adv_df[[i]]$AdvSubsidCode | 
+             AdvParentCode %in% list_adv_df[[i]]$AdvParentCode)
+}
+  return(filtered_brands)
+}
+
+#Tiny test below:
+identical(filt_brand_by_adv(health_insur_brands, par_subsid_adv_codes), ma_adv_hi_brands)
+
+###
+#' filt_brand_by_key
+#' Filters a list of brands by whether or not its BrandDesc or BrandVariant contains keywords in keyword vec and returns a list of brand code dfs containing the unique brandcodes of filtered brands
+#'
+#' @param list_brand_df list of brand dfs wth the columns BrandDesc and BrandVariant
+#' @param keyword_vec a vector of keyword strings
+#'
+#' @return a list of brand code dfs containing the unique brandcodes of filtered brands. The size of the return value is the same as the inputted list_brand_df, and can be indexed by list_brand_df (or a keyword_vec used with filt_adv_by_keyword).
+#' @export
+#'
+#' @examples 
+filt_brand_by_key <-  function(list_brand_df, keyword_vec) {
+  ma_keyword_l <- c("MEDICARE", "MEDICARE ADV") # FOR USER: ADD TO ME
+  brands_filtered_dfs <- list() #instantiating a list of dfs containing filtered brands to be outputted
+for (i in 1:length(list_brand_df)) {
+  brand_df <- brand[FALSE,] %>% mutate(keyword = NA) #initializing and adding a keyword tag to a brand df
+  for (j in 1:length(keyword_vec))  {
+    brand_df <- rbind(empty_df,
+                                list_brand_df[[i]] %>% 
+            filter(grepl(keyword_vec[[j]],BrandDesc) 
+                   | grepl(keyword_vec[[j]],BrandVariant)))
+  }
+  brands_filtered_dfs[[i]] <- brand_df
+}
+
+#Finding unique BrandCodes of keyword filtered Brands
+brand_codes_dfs <- list() #list of dfs containing the unique brand codes of HI brands associated with known MA advertisers filtered by MA-related keywords
+for (i in 1:length(brands_filtered_dfs)) {
+  brand_codes_dfs[[i]] <-unique_codes(brands_filtered_dfs[[i]], BrandCode)
+}
+return (brand_codes_dfs)
+}
+```
+##Looking at Output Files
+Here are some of the outputted data at each step of analysis for our known MA companies: Aetna, Cigna, Humana.
+```{r}
+
+```
+##Advertisers filtered by Known MA Providers (Aetna, Cigna, Humana)
+```{r}
+head(ma_adv_df_l[[1]],200) %>%
+  flextable(cwidth = c(1,2,1,2)) %>%
+  colformat_num(big.mark = "")#aetna-filtered advertisers
+head(ma_adv_df_l[[2]],200) %>%
+  flextable(cwidth = c(1,2,1,2)) %>%
+  colformat_num(big.mark = "") #cigna-filtered advertisers
+head(ma_adv_df_l[[3]],200) %>%
+  flextable(cwidth = c(1,2,1,2)) %>%
+  colformat_num(big.mark = "") #humana-filtered advertisers
+```
+##Medical & Dental Insurance Brands filtered by Known MA Providers (Aetna, Cigna, Humana)
+Note that the advertisers in the filter above were not all health insurance advertisers. However, filtering the Brands, which are already filtered by the ProductID B212 for Medical & Dental Insurance, accounts for this. In the end, the dataframes below should only contain Brands that are coded to be Medical & Dental Insurance and also affiliated with a known MA provider as its parent or subsidiary advertiser.
+```{r}
+```
+##Aetna
+```{r}
+select(ma_adv_hi_brands[[1]],BrandCode, BrandDesc, BrandVariant) %>% 
+  head(200) %>%
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "")#medical and dental insurance brands affiliated with Aetna
+```
+##Cigna
+```{r}
+select(ma_adv_hi_brands[[2]],BrandCode, BrandDesc, BrandVariant) %>% 
+  head(200) %>%
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "") #medical and dental insurance brands affiliated with Cigna
+```
+##Humana
+```{r}
+select(ma_adv_hi_brands[[3]],BrandCode, BrandDesc, BrandVariant) %>% 
+  head(200) %>%
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "")#medical and dental insurance brands affiliated with Humana
+
+view_brand_text <-  function(df) {
+  df %>% select(BrandCode, BrandDesc, BrandVariant)
+}
+```
+##MA-affiliated Medical & Dental Insurance Brands that contain the keywords ("MEDICARE" and "MEDICARE ADV") in their brand descriptions or variants
+More keywords can be added in ma_keyword_l. 
+```{r}
+```
+##Aetna
+```{r}
+view_brand_text(ma_keyword_brands[[1]]) %>% 
+  head(200) %>% 
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "")#Aetna
+```
+##Cigna
+```{r }
+view_brand_text(ma_keyword_brands[[2]]) %>% 
+  head(200) %>% 
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "")#Cigna
+```
+##Humana
+```{r }
+view_brand_text(ma_keyword_brands[[3]]) %>% 
+  head(200) %>% 
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "")#Humana
+```
+#Counts of Occurrences 
+```{r}
+aetna_net_tv <- filter_by_brand(net_tv,ma_keyword_unq_brand[[1]]) #; aetna_net_tv
+cigna_net_tv <-  filter_by_brand(net_tv,ma_keyword_unq_brand[[2]]) #; cigna_net_tv
+humana_net_tv <- filter_by_brand(net_tv,ma_keyword_unq_brand[[3]]) #; humana_net_tv
+
+aetna_spot_tv <- filter_by_brand(spot_tv,ma_keyword_unq_brand[[1]]) #; aetna_spot_tv
+cigna_spot_tv <-  filter_by_brand(spot_tv,ma_keyword_unq_brand[[2]]) #; cigna_spot_tv
+humana_spot_tv <- filter_by_brand(spot_tv,ma_keyword_unq_brand[[3]]) #; humana_spot_tv
+
+
+matrix_data <- c(nrow(aetna_net_tv),nrow(cigna_net_tv), nrow(cigna_net_tv),
+                 nrow(aetna_spot_tv), nrow(cigna_spot_tv),nrow(humana_spot_tv))
+
+occurrence_summary <- matrix(matrix_data, nrow = 2, ncol = 3, byrow = TRUE) 
+
+colnames(occurrence_summary) = c("Aetna", "Cigna", "Humana")
+
+rownames(occurrence_summary) = c("Network TV","Spot TV")
+occurrence_summary
+```
+##Filtering for additional keywords: "PFFS", "SNP", "Plan C"
+We see that there are no results ! The terms may be too specific/technical for sarching as words in the BrandDesc and BrandVariants. 
+```{r}
+ma_keyword_l_2 <- c("PFFS", "SNP", "Plan C") # FOR USER: ADD TO ME
+ma_keyword_brands_2 <- list() #list of dfs containing medical and dental insurance brands (associated with known MA advertisers) who have MA-related keywords in their BrandVar and BrandDesc
+for (advertiser in 1:length(ma_adv_hi_brands)){
+  #print(cat("advertiser count:",advertiser,"\n")) #expected: 3 (1:3)
+  all_keys_one_adver <- data.frame(matrix(nrow=0,ncol=length(names(brand))))
+  colnames(all_keys_one_adver) <- names(brand)
+  for (keyword in 1:length(ma_keyword_l_2))  {
+    #print(cat("keyword count:",keyword)) #expected: 2 (1,2)
+    all_keys_one_adver <- rbind(all_keys_one_adver,
+                                ma_adv_hi_brands[[advertiser]] %>% 
+            filter(grepl(ma_keyword_l_2[[keyword]],BrandDesc) 
+                   | grepl(ma_keyword_l_2[[keyword]],BrandVariant)))
+  }
+  ma_keyword_brands_2[[advertiser]] <- all_keys_one_adver
+}
+```
+##Results of additional keyword filtering
+
+```{r}
+ma_keyword_brands_2[[1]] #Aetna
+ma_keyword_brands_2[[2]] #Cigna
+ma_keyword_brands_2[[3]] #Humana
+
+matrix_data_2 <- c(nrow(ma_keyword_brands_2[[1]]),nrow(ma_keyword_brands_2[[2]]), nrow(ma_keyword_brands_2[[3]]))
+
+occurrence_summary_2 <- matrix(matrix_data_2, nrow = 1, ncol = 3, byrow = TRUE) 
+
+colnames(occurrence_summary_2) = c("Aetna", "Cigna", "Humana")
+
+rownames(occurrence_summary_2) = c("Total Count")
+occurrence_summary_2
+```
+
+## Objective: filtering brands by their brand descriptions and variants using MA-related keywords and linking to advertisers to identify advertisers who may be related to MA
+1. Filter all brands by brands that have the keywords: "MEDICARE", "MEDICARE ADV", "SENIOR", and "65", in their BrandDesc or their BrandVariant.
+2. Extract AdvParCode and AdvSubsidCode of these MA-related HI brands; filter advertisers by AdvParCode OR AdvSubsidCode to get all advertisers who are affiliated with MA-related keywords. 
+OPTIONAL:
+3. Filter HI brands by those advertiser codes again to get BrandCodes of all brands associated with these marginally related advertisers.
+4. Get occurrences associated with those brands. 
+(Occurrence data can only be identified by brand code. )
+
+## Writing some functions to acheive this
+```{r}
+#' grep_filter_brands
+#' Filters a Brand dataframe by the keywords in the keywords_list via grepping in BrandDesc and BrandVar
+#' @param brand_df a Dataframe of with the same column names as brand (Brand.tsv)
+#' @param keyword_list a vector of string keywords
+#' @param empty_df an initialized, empty df that will be transformed to the return df
+#'
+#' @return (empty list should be initialized) a single dataframe containing all of the brands that have at least one of the keywords in their
+#' BrandVar or BrandDesc, cols are column names of brand AND a new column called "keyword"
+#' @export
+#'
+#' @examples
+grep_filter_brands <- function(brand_df, keyword_vec) {
+  empty_df <- brand[FALSE,] #initializing the inputted empty_df
+  empty_df <- empty_df %>% mutate(keyword = NA)
+  for (i in 1:length(keyword_vec))  {
+    print(cat("keyword before append:", keyword_vec[[i]]))
+    empty_df <- rbind(empty_df, brand_df %>% 
+            filter(grepl(keyword_vec[[i]],BrandDesc) | grepl(keyword_vec[[i]],BrandVariant)) %>% 
+              mutate(keyword = keyword_vec[[i]]))
+    print(cat("keyword after append:", keyword_vec[[i]]))
+  }
+  return(empty_df %>% distinct(BrandCode,.keep_all = TRUE))
+}
+
+test_gfb <- health_insur_brands %>% filter(grepl("MEDICARE ADV",BrandDesc) | grepl("MEDICARE ADV",BrandVariant))
+all_brands_ma <- brand %>% filter(grepl("MEDICARE ADV",BrandDesc) | grepl("MEDICARE ADV",BrandVariant))
+all_brands_med <- brand %>% filter(grepl("MEDICARE",BrandDesc) | grepl("MEDICARE",BrandVariant))
+all_brands <-  rbind(all_brands_ma,all_brands_med)
+
+ma_key_brand <- grep_filter_brands(health_insur_brands, c("MEDICARE ADV"))
+ma_key_brand2 <- grep_filter_brands(brand, c("MEDICARE ADV", "MEDICARE"))
+
+#identical(test_gfb, grep_filter_brands(health_insur_brands, c("MEDICARE ADV")))
+identical(all_brands_ma %>% distinct(BrandCode,.keep_all = TRUE), grep_filter_brands(brand, c("MEDICARE ADV")) %>% select(-keyword))
+identical(all_brands %>% distinct(BrandCode,.keep_all = TRUE), grep_filter_brands(brand, c("MEDICARE ADV", "MEDICARE")) %>% select(-keyword))
+
+#' filter_adv_by_brand
+#' Filters inputted dataframe containing Advertiser columns by the BrandCodes in the inputted dataframe containing Brand columns (filtering advertisers by Brand)
+#' @param brand_df dataframe containing Brand.tsv columns
+#' @param adv_df dataframe containing Advertiser.tsv columns
+#'
+#' @return dataframe with Advertiser.tsv columns filtered by brands that have matching parent or subsidiary advertiser codes with adv_df
+#' @export
+#'
+#' @examples
+filter_adv_by_brand <-  function(brand_df, adv_df) {
+  return(adv_df %>% filter(AdvParentCode %in% brand_df$AdvParentCode 
+                           | AdvSubsidCode %in% brand_df$AdvSubsidCode) %>% 
+           distinct(AdvSubsidCode, .keep_all = TRUE))
+}
+
+test_fabb <- filter_adv_by_brand(all_brands_ma, adver)
+brand_adver_ma <- adver %>% filter(AdvParentCode %in% all_brands_ma$AdvParentCode 
+                           | AdvSubsidCode %in% all_brands_ma$AdvSubsidCode)
+identical(test_fabb,brand_adver_ma)
+
+test_fabb_two <- filter_adv_by_brand(all_brands, adver) 
+brand_adver_ma_m <- rbind(adver %>% filter(AdvParentCode %in% all_brands_ma$AdvParentCode 
+                           | AdvSubsidCode %in% all_brands_ma$AdvSubsidCode),
+                        adver %>% filter(AdvParentCode %in% all_brands_med$AdvParentCode 
+                           | AdvSubsidCode %in% all_brands_med$AdvSubsidCode)) %>% 
+  distinct(AdvSubsidCode, .keep_all = TRUE)
+
+identical(brand_adver_ma_m %>% arrange(AdvSubsidCode),test_fabb_two %>% arrange(AdvSubsidCode))
+#outputted df of advertisers is only filtered by subsidiary advertiser, so the advertisers list will be less noisy
+
+filter_adv_by_brand2 <-  function(brand_df, adv_df) {
+  return(adv_df %>% filter(AdvSubsidCode %in% brand_df$AdvSubsidCode) %>% 
+           distinct(AdvSubsidCode, .keep_all = TRUE))
+}
+```
+## Output files
+Searching all brands and only health-insurance brands by the keywords:"MEDICARE", "MEDICARE ADV", "SENIOR", "65", we can see that there is a difference between the two sets. 
+```{r}
+keywords <- c("MEDICARE", "MEDICARE ADV", "SENIOR", "65")
+allbrand_keys <- grep_filter_brands(brand, keywords) 
+#Showing only the first 100 entries of all brands filtered by above keywords
+allbrand_keys %>% 
+  head(20) %>% 
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "") 
+
+#Showing only the first 100 entries of HI brands filtered by above keywords
+hibrands_keys <- grep_filter_brands(health_insur_brands, keywords)
+hibrands_keys %>% 
+  head(20) %>% 
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "") 
+
+#Note: when HI insurance brands are filtered, there are significantly less entries. However, filtering only HI brands may miss some MA-related ads, as seen below:
+setdiff(all_brands_ma,test_gfb) #Note that PCCSubCode and ProductID has no patterns among its distribution
+#The difference in rows between all brands and health-insurance brands filtered by "MEDICARE ADV"
+inner_join(setdiff(all_brands_ma,test_gfb), prod_cat) %>% 
+  select(colnames(brand),PCCSubCode) %>% 
+  inner_join(prod_cat, by = "ProductID") %>% 
+  select(-PCCSubCode.x) %>% rename(PCCSubCode = PCCSubCode.y) %>% 
+  select(colnames(brand), ProductDesc, PCCSubDesc) %>% 
+  relocate(ProductDesc, PCCSubDesc) 
+##THIS IS AN INTERESTING DATASET^
+
+#However, filtering all brands by "SENIOR" and "65" is a bit too noisy. 
+#We can reduce the noise by filtering all brands by more specific terms, like "MEDICARE", "MEDICARE ADV" and filtering HI brands by more broad terms, like "SENIOR" and "65"
+less_noise_brands <- rbind(grep_filter_brands(brand, c( "MEDICARE ADV", "MEDICARE")), #MEDICARE ADV SHOULD BE BEFORE MEDICARE otherwise, all MA brands will be labeled with "MEDICARE"
+                    grep_filter_brands(health_insur_brands, c("SENIOR", "65")) %>% 
+                    distinct(BrandCode, .keep_all = TRUE)) ; less_noise_brands
+less_noise_brands %>% 
+  flextable(cwidth = c(1,2,2)) %>%
+  colformat_num(big.mark = "") 
+
+  
+#What keyword is each parent advertiser known for ?
+
+###MA-related advertisers, using less noisy Brand dataset and including Brands who have MA-related Adv as Parent Advertisers... noisy dataset of 3549 entries.
+ma_keywords_adv <- filter_adv_by_brand(less_noise_brands, adver) %>% 
+  left_join(less_noise_brands %>% select(keyword, AdvSubsidCode), by = 'AdvSubsidCode') %>% 
+  relocate(keyword)
+View(arrange(ma_keywords_adv, keyword))
+ma_keywords_adv  %>% 
+  flextable(cwidth = c(1,2,1,2)) %>%
+  colformat_num(big.mark = "") #This includes all the subsidiary advertisers (MA-related or not) of MA-related parent advertisers, so the output is a bit noisy
+
+#Less noisy advertiser dataset, by filtering advertisers by only MA-related subsidiary advertiser. 5050 entries. 
+ma_keywords_adv_ln <- filter_adv_by_brand2(less_noise_brands, adver) %>% 
+  mutate(AdvSubsidDesc = as.character(AdvSubsidDesc)) %>% 
+  mutate(AdvParentDesc = as.character(AdvParentDesc)) ; ma_keywords_adv_ln
+View(ma_keywords_adv_ln)
+ma_keywords_adv_ln %>% 
+  flextable(cwidth = c(1,2,1,2)) %>%
+  colformat_num(big.mark = "")
+
+#####
+#Occurrences based on MA-related subsidiary advertisers
+ln_net_tv <- filter_by_brand(net_tv, less_noise_brands)
+ln_spot <- filter_by_brand(spot_tv_sel, less_noise_brands)
+
+#Filtering HI brands by with more noisy adv dataset 
+noisy_ma_brands <- filt_brand_by_adv(health_insur_brands,list(ma_keywords_adv))
+noisy_net <- filter_by_brand(net_tv, noisy_ma_brands[[1]])
+system.time(noisy_spot <- filter_by_brand(spot_tv_sel, noisy_ma_brands[[1]]))
+
+#parent advs of noisy adv dataset
+parent_advs <- ma_keywords_adv %>% 
+  select(AdvParentCode, AdvParentDesc) %>%  
+  distinct(AdvParentCode, .keep_all = TRUE); parent_advs
+
+
+#This is still a lot of results, so let's analyze this a bit.
+
+##Brand Analysis
+#Keyword prevalence among  MA-related brands
+less_noise_brands %>% 
+  count(keyword) %>% arrange(desc(n)) %>% 
+  mutate(proportion = n/nrow(less_noise_brands)) %>% 
+  flextable() %>% colformat_num(big.mark = "") 
+
+#Counts of brands with each advertiser as its parent advertiser 
+less_noise_brands %>% 
+  count(AdvParentCode) %>% 
+  arrange(desc(n)) %>% 
+  inner_join(parent_advs, by = 'AdvParentCode') %>% 
+  relocate(AdvParentDesc) %>% 
+  flextable() %>% 
+  colformat_num(big.mark = "") 
+
+##ADV ANALYSIS BELOW. Recall: subsidiary advertisers are unique. 
+
+#advertisers matched with the keyword that their linked brand is labeled with 
+link_adv_keyword <- ma_keywords_adv_ln %>%  
+  left_join(less_noise_brands %>% 
+              select(keyword, AdvSubsidCode)  %>% 
+              distinct(AdvSubsidCode, .keep_all = TRUE), by = 'AdvSubsidCode') %>% 
+  relocate(keyword) 
+link_adv_keyword %>% 
+  flextable() %>% 
+  colformat_num(big.mark = "") 
+
+#prevalence of keyword by Advertiser Parent. What keywords are most frequent amongst each AdvParent ?
+link_adv_keyword %>% group_by(AdvParentDesc) %>% count(keyword) %>% arrange(desc(n)) %>% ungroup()
+
+#Number of subsid advertisers per parent advertiser. What AdvParents have the most total number of subsidiary adv?
+ma_keywords_adv_ln %>% group_by(AdvParentDesc) %>% 
+  summarize(number_of_subsid_adv_per_parent_adv = n()) %>% 
+  arrange(desc(number_of_subsid_adv_per_parent_adv)) %>% 
+  #mutate(proportion = n/nrow(link_adv_keyword)) %>% 
+  flextable() %>% 
+  colformat_num(big.mark = "") 
+
+#Counts of keywords that are most prevalent among the advertisers affiliated with these brands
+link_adv_keyword %>% 
+  count(keyword) %>% 
+  arrange(desc(n)) %>% 
+  mutate(proportion = n/nrow(link_adv_keyword)) %>% 
+  flextable() %>% 
+  colformat_num(big.mark = "") 
+
+#Counts of MA-related advertisers by Advertising Parent. 
+link_adv_keyword %>% 
+  count(AdvParentDesc) %>% 
+  arrange(desc(n)) %>% 
+  mutate(prop = n/nrow(link_adv_keyword)) %>% 
+  flextable() %>% 
+  colformat_num(big.mark = "") 
+
+
+# write_csv(ln_net_tv, "/users/dkim221/data/occurence csv files/ln_net_tv.csv")
+# write_csv(ln_spot, "/users/dkim221/data/occurence csv files/ln_spot.csv")
+# write_csv(noisy_net, "/users/dkim221/data/occurence csv files/noisy_net.csv")
+# write_csv(noisy_net, "/users/dkim221/data/occurence csv files/noisy_spot.csv")
+
+```
+
+
